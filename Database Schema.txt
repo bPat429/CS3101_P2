@@ -1,0 +1,212 @@
+create or replace table player
+(
+    email varchar(256) not null,
+    forename varchar(256) not null,
+    middlenames varchar(256),
+    surname varchar(256) not null,
+    date_of_birth date not null,
+    primary key (email),
+    CONSTRAINT email_at_check check (1 < locate('@', email) AND locate('@', email) < char_length(email))
+);
+
+create or replace table player_phone
+(
+    email varchar(256) not null,
+    phone_number varchar(256) not null,
+    phone_type enum('home', 'mobile', 'work') not null,
+    primary key (email, phone_number),
+    CONSTRAINT player_email_fk foreign key (email) references player(email)
+        on delete cascade on update cascade,
+    CONSTRAINT phone_type_check check (phone_type in ('home', 'mobile', 'work'))
+);
+
+create or replace table venue
+(
+    name varchar(256) not null,
+    address varchar(256) not null,
+    primary key (name)
+);
+
+create or replace table court
+(
+    number int not null,
+    venue_name varchar(256) not null,
+    primary key (number, venue_name),
+    CONSTRAINT court_venue_name_fk foreign key (venue_name) references venue(name)
+        on delete cascade on update cascade
+);
+
+create or replace table league
+(
+    name varchar(256) not null,
+    year int not null,
+    prize_money numeric (12,2) default 0,
+    winner_email varchar(256),
+    CONSTRAINT league_name_year_unique UNIQUE (name, year),
+    key (year),
+    primary key (name, year),
+    CONSTRAINT winner_email_fk foreign key (winner_email) references player(email)
+        on delete cascade on update cascade
+
+);
+
+create or replace table league_player
+(
+    email varchar(256) not null,
+    league_name varchar(256) not null,
+    league_year int not null,
+    primary key (email, league_name, league_year),
+    CONSTRAINT league_player_email_fk foreign key (email) references player(email)
+        on delete cascade on update cascade,
+    CONSTRAINT league_player_league_name_fk foreign key (league_name) references league(name)
+        on delete cascade on update cascade,
+    CONSTRAINT league_player_league_year_fk foreign key (league_year) references league(year)
+        on delete cascade on update cascade
+);
+
+create or replace table played_match
+(
+    id int auto_increment not null,
+    p1_email varchar(256) not null,
+    p2_email varchar(256) not null,
+    p1_games_won int default 0,
+    p2_games_won int default 0,
+    date_played date not null,
+    court_number int not null,
+    venue_name varchar(256) not null,
+    league_name varchar(256) not null,
+    league_year int not null,
+    primary key (id),
+    CONSTRAINT p1_email_fk foreign key (p1_email) references player(email)
+        on delete cascade on update cascade,
+    CONSTRAINT p2_email_fk foreign key (p2_email) references player(email)
+        on delete cascade on update cascade,
+    CONSTRAINT court_number_fk foreign key (court_number) references court(number)
+        on delete cascade on update cascade,
+    CONSTRAINT venue_name_fk foreign key (venue_name) references venue(name)
+        on delete cascade on update cascade,
+    CONSTRAINT league_name_fk foreign key (league_name) references league(name)
+        on delete cascade on update cascade,
+    CONSTRAINT league_year_fk foreign key (league_year) references league(year)
+        on delete cascade on update cascade,
+    CONSTRAINT match_wins_check check ((3 = p1_games_won OR 3 = p2_games_won)
+        AND (3 > p1_games_won OR 3 > p2_games_won)),
+    CONSTRAINT match_year_check check (year(date_played) = league_year)
+);
+
+create or replace trigger players_registered_insert_trigger before insert on played_match for each row
+begin
+    if (new.p1_email not in (select email
+                             from league_player as p
+                             where p.league_year = new.league_year
+                               AND p.league_name = new.league_name))
+    then
+        signal sqlstate '45001' set message_text = 'Invalid match, player 1 not registered in league';
+    end if;
+    if (new.p2_email not in (select email
+                             from league_player as p
+                             where p.league_year = new.league_year
+                               AND p.league_name = new.league_name))
+    then
+        signal sqlstate '45001' set message_text = 'Invalid match, player 2 not registered in league';
+    end if;
+end;
+
+create or replace trigger players_registered_update_trigger before update on played_match for each row
+begin
+    if (new.p1_email not in (select email
+                             from league_player as p
+                             where p.league_year = new.league_year
+                               AND p.league_name = new.league_name))
+    then
+        signal sqlstate '45001' set message_text = 'Invalid match, player 1 not registered in league';
+    end if;
+    if (new.p2_email not in (select email
+                             from league_player as p
+                             where p.league_year = new.league_year
+                               AND p.league_name = new.league_name))
+    then
+        signal sqlstate '45001' set message_text = 'Invalid match, player 2 not registered in league';
+    end if;
+end;
+
+create or replace view view_court_details as
+select *
+from court
+         INNER JOIN venue on court.venue_name = venue.name;
+
+create or replace view view_never_played as
+select distinct number, view_court_details.venue_name, address
+from view_court_details, played_match
+where view_court_details.number NOT IN
+      (select distinct court_number from played_match
+       where view_court_details.venue_name = played_match.venue_name)
+order by venue_name asc;
+
+create or replace view view_all_won_matches as
+select p1_email as email
+from played_match
+where p1_games_won = 3
+union all
+select p2_email as email
+from played_match
+where p2_games_won = 3;
+
+create or replace view view_win_count as
+select distinct email, count(email) over (partition by email)
+    as matches_won
+from view_all_won_matches
+order by email asc;
+
+create or replace view view_player_fullname as
+select player.email, surname,
+       concat_ws(' ', forename, middlenames, surname) as fullname
+from player
+order by email desc;
+
+create or replace view view_player_phones as
+select email, group_concat(phone_number)
+    as phone_numbers
+from player_phone
+group by email
+order by email asc;
+
+create or replace view view_contact_details as
+select fullname, f.email, phone_numbers
+from view_player_fullname as f, view_player_phones as p
+where f.email = p.email
+order by f.surname, f.fullname, f.email;
+
+create or replace view view_matches_with_p1_fullname as
+select fullname as p1_name, p2_email, p1_games_won, p2_games_won,
+       date_played, court_number, venue_name, league_name, league_year
+from view_player_fullname as f, played_match as m
+where f.email = m.p1_email
+order by venue_name asc;
+
+create or replace view view_matches_with_fullname as
+select fullname as p2_name, p1_name, p1_games_won, p2_games_won,
+       date_played, court_number, venue_name, league_name, league_year
+from view_player_fullname as f, view_matches_with_p1_fullname as m
+where f.email = m.p2_email
+order by venue_name asc;
+
+DELIMITER $$
+create procedure proc_add_venue(in v_name varchar(256), venue_address varchar(256), courts int)
+begin
+    if (courts < 1)
+    then
+        signal sqlstate '45001' set message_text = 'Invalid number of courts, must be greater than or equal to 1';
+    end if;
+    insert into venue (name, address) VALUES (v_name, venue_address);
+
+
+    add_courts_loop_label: LOOP
+        insert into court (number, venue_name) VALUES (courts, v_name);
+        SET courts = courts -1;
+        IF courts > 0
+        THEN ITERATE add_courts_loop_label;
+        END IF;
+        LEAVE add_courts_loop_label;
+    end loop;
+end $$
